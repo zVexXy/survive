@@ -4,22 +4,29 @@ local PathfindingService = game:GetService("PathfindingService")
 local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 
--- Configurações
 local ITENS_UTEIS = { "Chave", "Cartao", "Disco" }
 local LOCAIS_USO = { Chave = "Porta", Cartao = "Computador", Disco = "Terminal" }
 local ITENS_ATAQUE = { "Banana", "Bomba" }
 local SAIDA = workspace:FindFirstChild("SaidaFinal")
+local CAÇADOR = workspace:FindFirstChild("Caçador")
+local SOBREVIVENTES = {}
 
-local CAÇADOR = workspace:FindFirstChild("Caçador") -- O modelo do caçador
-local SOBREVIVENTES = {} -- Preenchido automaticamente
-
--- Estado
-local modo = nil -- nil, "sobrevivente", "caçador"
+local modo = nil
 local itensUsados = {}
 local menuGui
 local ESPObjs = {}
 
--- Funções
+-- Detecta armadilhas
+function getArmadilhas()
+    local traps = {}
+    for _, obj in ipairs(workspace:GetChildren()) do
+        if obj:IsA("BasePart") and obj.Name == "Armadilha" then
+            table.insert(traps, obj)
+        end
+    end
+    return traps
+end
+
 function isItemUtil(itemName)
     for _, nome in ipairs(ITENS_UTEIS) do
         if itemName == nome then return true end
@@ -54,8 +61,24 @@ function distancia(obj1, obj2)
     return (obj1.Position - obj2.Position).Magnitude
 end
 
-function moverAte(objeto)
+-- Verifica se o caminho passa por armadilhas
+function caminhoTemArmadilha(path)
+    local traps = getArmadilhas()
+    if not path or not path.Status == Enum.PathStatus.Complete then return false end
+    for _, waypoint in ipairs(path:GetWaypoints()) do
+        for _, trap in ipairs(traps) do
+            if (waypoint.Position - trap.Position).Magnitude < 7 then -- raio de detecção da armadilha
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- Faz caminho evitando armadilhas (se possível)
+function moverAteEvitarArmadilha(objeto)
     if not objeto or not objeto.Position then return end
+    local traps = getArmadilhas()
     local path = PathfindingService:CreatePath({
         AgentRadius = 2,
         AgentHeight = 5,
@@ -64,7 +87,35 @@ function moverAte(objeto)
         End = objeto.Position,
     })
     path:ComputeAsync()
-    path:MoveTo(character)
+    if not caminhoTemArmadilha(path) then
+        path:MoveTo(character)
+        return
+    end
+    -- Se todas rotas com armadilhas, tenta a mais longe do caçador
+    local caçadorHRP = CAÇADOR and CAÇADOR:FindFirstChild("HumanoidRootPart")
+    local maisDistante = nil
+    local maiorDist = -math.huge
+    for _, trap in ipairs(traps) do
+        local dist = caçadorHRP and distancia(trap, caçadorHRP) or 0
+        if dist > maiorDist then
+            maiorDist = dist
+            maisDistante = trap
+        end
+    end
+    if maisDistante then
+        local pos = maisDistante.Position + (maisDistante.Position - (caçadorHRP and caçadorHRP.Position or Vector3.new())) * 2
+        local pathEscape = PathfindingService:CreatePath({
+            AgentRadius = 2,
+            AgentHeight = 5,
+            AgentCanJump = true,
+            Start = character.HumanoidRootPart.Position,
+            End = pos,
+        })
+        pathEscape:ComputeAsync()
+        pathEscape:MoveTo(character)
+    else
+        path:MoveTo(character)
+    end
 end
 
 function coletarItem(item)
@@ -73,7 +124,7 @@ function coletarItem(item)
         item.Parent = player.Backpack
         return true
     else
-        moverAte(item)
+        moverAteEvitarArmadilha(item)
         return false
     end
 end
@@ -81,7 +132,7 @@ end
 function usarItem(itemName)
     local localUso = getLocalUso(itemName)
     if localUso then
-        moverAte(localUso)
+        moverAteEvitarArmadilha(localUso)
         if distancia(character.HumanoidRootPart, localUso) < 7 then
             itensUsados[itemName] = true
             local backpackItem = player.Backpack:FindFirstChild(itemName)
@@ -96,7 +147,7 @@ end
 
 function irParaSaida()
     if SAIDA then
-        moverAte(SAIDA)
+        moverAteEvitarArmadilha(SAIDA)
     end
 end
 
@@ -106,7 +157,7 @@ function fugirDoCaçador()
     if not caçadorHRP then return end
     local dir = (character.HumanoidRootPart.Position - caçadorHRP.Position).Unit
     local destino = character.HumanoidRootPart.Position + dir * 20
-    moverAte({Position = destino})
+    moverAteEvitarArmadilha({Position = destino})
 end
 
 function perseguirSobrevivente()
@@ -119,10 +170,9 @@ function perseguirSobrevivente()
             alvo = hrp
         end
     end
-    if alvo then moverAte(alvo) end
+    if alvo then moverAteEvitarArmadilha(alvo) end
 end
 
--- ESP
 function criarESP(target, color)
     if not target then return end
     local esp = Instance.new("BillboardGui")
@@ -159,7 +209,6 @@ function atualizarSobreviventes()
     end
 end
 
--- Loops dos modos
 spawn(function()
     while true do
         wait(0.2)
@@ -183,7 +232,6 @@ spawn(function()
     end
 end)
 
--- Loop ESP
 RunService.RenderStepped:Connect(function()
     limparESP()
     if modo == "sobrevivente" and CAÇADOR and distancia(character.HumanoidRootPart, CAÇADOR.HumanoidRootPart) < 20 then
@@ -198,7 +246,6 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- Interface móvel e compacta
 function criarMenu()
     menuGui = Instance.new("ScreenGui")
     menuGui.Name = "MenuRobo"
@@ -209,6 +256,7 @@ function criarMenu()
     frame.Position = UDim2.new(0, 60, 0, 60)
     frame.BackgroundColor3 = Color3.fromRGB(40,40,40)
     frame.BorderSizePixel = 2
+    frame.BackgroundTransparency = 0 -- SEM transparência!
     frame.Parent = menuGui
 
     local btnSobrevivente = Instance.new("TextButton")
